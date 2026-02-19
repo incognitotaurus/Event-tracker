@@ -7,12 +7,35 @@ const cron = require('node-cron');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
-const DATA_FILE = path.join(__dirname, 'data', 'events.json');
-const META_FILE = path.join(__dirname, 'data', 'meta.json');
 
-// ── Ensure data dir exists ──────────────────────────────────────────────────
-if (!fs.existsSync(path.join(__dirname, 'data'))) {
-  fs.mkdirSync(path.join(__dirname, 'data'));
+// ── Resolve paths robustly regardless of cwd ──────────────────────────────
+// __dirname = directory of server.js, works on Railway/Render/Docker/local
+const ROOT_DIR = __dirname;
+const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
+const DATA_DIR = path.join(ROOT_DIR, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'events.json');
+const META_FILE = path.join(DATA_DIR, 'meta.json');
+
+// ── Startup diagnostics ────────────────────────────────────────────────────
+console.log('=== BLR.AI Tracker ===');
+console.log(`ROOT_DIR  : ${ROOT_DIR}`);
+console.log(`PUBLIC_DIR: ${PUBLIC_DIR} — exists: ${fs.existsSync(PUBLIC_DIR)}`);
+console.log(`DATA_DIR  : ${DATA_DIR}`);
+console.log(`API KEY   : ${ANTHROPIC_API_KEY ? '✓ Set' : '✗ NOT SET'}`);
+console.log(`PORT      : ${PORT}`);
+
+// ── Ensure data dir exists ─────────────────────────────────────────────────
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  console.log('Created data/ directory');
+}
+
+// ── Validate public dir exists ─────────────────────────────────────────────
+if (!fs.existsSync(PUBLIC_DIR)) {
+  console.error(`ERROR: public/ directory not found at ${PUBLIC_DIR}`);
+  console.error('Make sure your zip was extracted with the full folder structure:');
+  console.error('  blrai-app/server.js');
+  console.error('  blrai-app/public/index.html');
 }
 
 // ── Data helpers ───────────────────────────────────────────────────────────
@@ -31,7 +54,23 @@ function writeMeta(meta) {
 
 // ── Middleware ─────────────────────────────────────────────────────────────
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(PUBLIC_DIR));
+
+// ── Health check (always works, useful for debugging) ─────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    publicDirExists: fs.existsSync(PUBLIC_DIR),
+    indexHtmlExists: fs.existsSync(path.join(PUBLIC_DIR, 'index.html')),
+    dataDirExists: fs.existsSync(DATA_DIR),
+    hasApiKey: !!ANTHROPIC_API_KEY,
+    eventCount: readEvents().length,
+    rootDir: ROOT_DIR,
+    publicDir: PUBLIC_DIR,
+    node: process.version,
+    uptime: Math.round(process.uptime()) + 's',
+  });
+});
 
 // ── API: Get all events ────────────────────────────────────────────────────
 app.get('/api/events', (req, res) => {
@@ -109,6 +148,7 @@ async function performScan(emitter) {
           'Content-Type': 'application/json',
           'x-api-key': ANTHROPIC_API_KEY,
           'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'web-search-2025-03-05',
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
@@ -159,6 +199,7 @@ Rules: Only Bangalore/Bengaluru AI/ML events. Dates must be ${today} or later. S
         'Content-Type': 'application/json',
         'x-api-key': ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'web-search-2025-03-05',
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
@@ -264,10 +305,37 @@ cron.schedule('30 2 * * *', () => {
   performScan();
 });
 
+// ── Catch-all: serve index.html for any non-API route ─────────────────────
+// This must come AFTER all API routes and static middleware
+app.get('*', (req, res) => {
+  const indexPath = path.join(PUBLIC_DIR, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    // Helpful diagnostic page when public/ is missing
+    res.status(500).send(`
+      <html><body style="font-family:monospace;background:#0a0a0b;color:#e8e8f0;padding:40px">
+        <h2 style="color:#ff4455">⚠ Setup Error</h2>
+        <p>Could not find <code>public/index.html</code></p>
+        <p>Expected it at: <code>${indexPath}</code></p>
+        <hr style="border-color:#333;margin:20px 0">
+        <p><strong>This usually means:</strong></p>
+        <ul style="line-height:2;color:#8888aa">
+          <li>The zip was extracted incorrectly — make sure <code>public/</code> is inside the same folder as <code>server.js</code></li>
+          <li>On Railway/Render: the repo root should contain both <code>server.js</code> and the <code>public/</code> folder</li>
+          <li>Check the <a href="/api/health" style="color:#00c8ff">/api/health</a> endpoint for diagnostics</li>
+        </ul>
+        <p>server.js is at: <code>${ROOT_DIR}</code></p>
+        <p>Looking for public/ at: <code>${PUBLIC_DIR}</code></p>
+      </body></html>
+    `);
+  }
+});
+
 // ── Start ──────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 BLR.AI Tracker running at http://localhost:${PORT}`);
-  console.log(`   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY ? '✓ Set' : '✗ Not set — add to environment'}`);
-  console.log(`   Data: ${DATA_FILE}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n🚀 BLR.AI Tracker running on port ${PORT}`);
+  console.log(`   Visit: http://localhost:${PORT}`);
+  console.log(`   Health: http://localhost:${PORT}/api/health`);
   console.log(`   Auto-scan: Daily at 8:00 AM IST\n`);
 });
